@@ -705,11 +705,48 @@ func TestBuildTrustedProxySettings(t *testing.T) {
 // TestBuildAPIConfig verifies that buildAPIConfig returns the exact config
 // main() passes to api.New, with no field assignments in between.
 func TestBuildAPIConfig(t *testing.T) {
-	// Tripwire: if api.Config's field count changes, update this test.
-	// buildAPIConfig sets 21 fields; MsgPerMinute, MsgBurst, EmailBurst,
-	// EmailRcptPerHour, NotifyBurst, and StatsCacheTTL are defaulted in api.New.
-	if got, want := reflect.TypeOf(api.Config{}).NumField(), 27; got != want {
-		t.Fatalf("api.Config has %d fields, expected %d; update TestBuildAPIConfig expected configs", got, want)
+	// Tripwire: a renamed, reordered, or added field fails here even when the
+	// new field stays at its zero value and the count-only check would pass
+	// after someone updated the number. buildAPIConfig sets 21 fields;
+	// MsgPerMinute, MsgBurst, EmailBurst, EmailRcptPerHour, NotifyBurst,
+	// and StatsCacheTTL are defaulted in api.New.
+	wantFields := []string{
+		"RegisterToken",
+		"MsgPerMinute",
+		"MsgBurst",
+		"Logger",
+		"Mailer",
+		"PublicURL",
+		"EmailPerHour",
+		"EmailBurst",
+		"EmailRcptPerHour",
+		"NotifyPerHour",
+		"NotifyBurst",
+		"TrustedProxies",
+		"AllowBroadIPv6",
+		"Clock",
+		"MaxOutstandingInvites",
+		"RetentionSeconds",
+		"MessageRetentionSeconds",
+		"AuthFailPerMinute",
+		"AuthFailBurst",
+		"WritePerMinute",
+		"WriteBurst",
+		"KeyIndexRebuildHours",
+		"VersionDetail",
+		"CodePepper",
+		"MaxBagsPerPeer",
+		"MaxBagBytesPerPeer",
+		"StatsCacheTTL",
+	}
+	cfgType := reflect.TypeOf(api.Config{})
+	if cfgType.NumField() != len(wantFields) {
+		t.Fatalf("api.Config has %d fields, expected %d; update TestBuildAPIConfig expected configs", cfgType.NumField(), len(wantFields))
+	}
+	for i, name := range wantFields {
+		if got := cfgType.Field(i).Name; got != name {
+			t.Errorf("api.Config field %d = %s, want %s", i, got, name)
+		}
 	}
 
 	testClock := clocktest.New(time.Unix(1234567890, 0))
@@ -1394,10 +1431,11 @@ func TestDescribeSMTPMode(t *testing.T) {
 // are rate-limited separately, proving XFF is honored.
 func TestBroadProxyBehavior(t *testing.T) {
 	tests := []struct {
-		name         string
-		allowBroad   string
-		trustedProxy string
-		wantNewErr   bool
+		name            string
+		allowBroad      string
+		trustedProxy    string
+		wantNewErr      bool
+		untrustedRemote bool
 	}{
 		{
 			name:         "broad /29 without opt-in rejected at buildTrustedProxySettings",
@@ -1410,6 +1448,12 @@ func TestBroadProxyBehavior(t *testing.T) {
 			allowBroad:   "1",
 			trustedProxy: "2a06:98c0::/29",
 			wantNewErr:   false,
+		},
+		{
+			name:            "untrusted remote ignores XFF and shares one bucket",
+			allowBroad:      "1",
+			trustedProxy:    "2a06:98c0::/29",
+			untrustedRemote: true,
 		},
 	}
 
@@ -1467,8 +1511,12 @@ func TestBroadProxyBehavior(t *testing.T) {
 			// Create test HTTP server with custom transport to control RemoteAddr
 			handler := srv.Handler()
 			testSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Rewrite RemoteAddr to be inside the trusted /29
-				r.RemoteAddr = "[2a06:98c0::1]:12345"
+				if tt.untrustedRemote {
+					r.RemoteAddr = "198.51.100.8:12345"
+				} else {
+					// Rewrite RemoteAddr to be inside the trusted /29
+					r.RemoteAddr = "[2a06:98c0::1]:12345"
+				}
 				handler.ServeHTTP(w, r)
 			}))
 			testSrv.Start()
@@ -1498,6 +1546,13 @@ func TestBroadProxyBehavior(t *testing.T) {
 			}
 			if status := sendAuthFail("203.0.113.1"); status != 401 {
 				t.Errorf("XFF A request 2 status = %d, want 401", status)
+			}
+			if tt.untrustedRemote {
+				// A different XFF from an untrusted socket is the same client.
+				if status := sendAuthFail("203.0.113.2"); status != 429 {
+					t.Errorf("XFF B from untrusted remote status = %d, want 429", status)
+				}
+				return
 			}
 			// XFF IP A: should be rate-limited now
 			if status := sendAuthFail("203.0.113.1"); status != 429 {
