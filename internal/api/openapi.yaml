@@ -73,6 +73,45 @@ paths:
                 properties:
                   version:
                     type: string
+  /v1/a2a/tasks/{id}:
+    get:
+      operationId: getA2ATask
+      summary: Get an A2A task
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: answerA2ATask
+      summary: Executor answer for an A2A task
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated task
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/public/stats:
     get:
       operationId: publicStats

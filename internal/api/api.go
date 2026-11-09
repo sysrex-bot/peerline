@@ -339,6 +339,7 @@ func (s *Server) buildHandler() (http.Handler, []string) {
 	reg(authed, "POST /v1/me/rotate-key", s.rateLimitWrite(s.rotateKey))
 	s.webhookRoutes(reg, authed)
 	s.signingKeyRoutes(reg, authed)
+	s.a2aTaskRoutes(reg, authed)
 	reg(authed, "DELETE /v1/me", s.rateLimitWrite(s.deleteMe))
 	reg(authed, "POST /v1/me/verify-email", s.rateLimitWrite(s.verifyEmail))
 	reg(authed, "POST /v1/invites", s.rateLimitWrite(s.createInvite))
