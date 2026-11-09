@@ -26,38 +26,57 @@ import (
 //
 // Future handlers that delete peers (#19 DeletePeer, RotateKey) or purge (#3 v4)
 // MUST follow this pattern to maintain consistency.
+// keyRec is one hash in the index. expiresAt 0 means the key does not expire.
+type keyRec struct {
+	peerID    string
+	expiresAt int64
+}
+
 type keyIndex struct {
 	mu      sync.RWMutex
-	entries map[string]string // keyHash -> peerID
+	entries map[string]keyRec // keyHash -> peer
 }
 
 func newKeyIndex() *keyIndex {
 	return &keyIndex{
-		entries: make(map[string]string),
+		entries: make(map[string]keyRec),
 	}
 }
 
-// Lookup returns the peer ID for the given key hash, or empty string if not found.
-func (idx *keyIndex) Lookup(keyHash string) (peerID string, ok bool) {
+// Lookup returns the peer ID for the given key hash. A key with expiresAt in
+// the past (now >= expiresAt, expiresAt > 0) is treated as absent.
+func (idx *keyIndex) Lookup(keyHash string, now int64) (peerID string, ok bool) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	peerID, ok = idx.entries[keyHash]
-	return peerID, ok
+	rec, ok := idx.entries[keyHash]
+	if !ok {
+		return "", false
+	}
+	if rec.expiresAt > 0 && now >= rec.expiresAt {
+		return "", false
+	}
+	return rec.peerID, true
 }
 
-// add inserts or updates a key hash -> peer ID mapping.
+// add inserts a key that does not expire.
 func (idx *keyIndex) add(keyHash, peerID string) {
+	idx.addUntil(keyHash, peerID, 0)
+}
+
+// addUntil inserts a key that stops authenticating at expiresAt (unix seconds).
+// expiresAt 0 means it does not expire.
+func (idx *keyIndex) addUntil(keyHash, peerID string, expiresAt int64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.entries[keyHash] = peerID
+	idx.entries[keyHash] = keyRec{peerID: peerID, expiresAt: expiresAt}
 }
 
 // remove deletes all key hashes for the given peer ID.
 func (idx *keyIndex) remove(peerID string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	for keyHash, p := range idx.entries {
-		if p == peerID {
+	for keyHash, rec := range idx.entries {
+		if rec.peerID == peerID {
 			delete(idx.entries, keyHash)
 		}
 	}
@@ -71,9 +90,9 @@ func (idx *keyIndex) Len() int {
 }
 
 // replace swaps in a newly built map. Lookups keep seeing the previous map until the swap.
-func (idx *keyIndex) replace(entries map[string]string) {
+func (idx *keyIndex) replace(entries map[string]keyRec) {
 	if entries == nil {
-		entries = make(map[string]string)
+		entries = make(map[string]keyRec)
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -88,20 +107,26 @@ func (s *Store) LoadKeyIndex(ctx context.Context) (n int, dur time.Duration, err
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
 
-	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, id FROM peers`)
+	now := s.nowUnix()
+	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, id, prev_key_hash, prev_key_expires_at FROM peers`)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer rows.Close()
 
-	next := make(map[string]string)
+	next := make(map[string]keyRec)
 	for rows.Next() {
-		var keyHash, peerID string
-		if err := rows.Scan(&keyHash, &peerID); err != nil {
+		var keyHash, peerID, prevHash string
+		var prevExp int64
+		if err := rows.Scan(&keyHash, &peerID, &prevHash, &prevExp); err != nil {
 			return 0, 0, err
 		}
-		next[keyHash] = peerID
+		next[keyHash] = keyRec{peerID: peerID}
 		n++
+		if prevHash != "" && prevExp > now {
+			next[prevHash] = keyRec{peerID: peerID, expiresAt: prevExp}
+			n++
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return 0, 0, err
@@ -114,7 +139,7 @@ func (s *Store) LoadKeyIndex(ctx context.Context) (n int, dur time.Duration, err
 
 // KeyIndexLookup returns the peer ID for the given key hash, or ("", false) if not found.
 func (s *Store) KeyIndexLookup(keyHash string) (peerID string, ok bool) {
-	return s.keyIndex.Lookup(keyHash)
+	return s.keyIndex.Lookup(keyHash, s.nowUnix())
 }
 
 // InvalidatePeerCache removes all key hashes for the given peer ID from the index.
@@ -131,7 +156,7 @@ func (s *Store) keyIndexRemove(peerID string) {
 	s.keyIndex.remove(peerID)
 }
 
-// KeyIndexLen returns the number of entries in the key index.
+// KeyIndexLen returns the number of entries in the index.
 func (s *Store) KeyIndexLen() int {
 	return s.keyIndex.Len()
 }
@@ -145,7 +170,7 @@ func (s *Store) KeyIndexLoaded() bool {
 // or if forceRebuild is true. Returns true if a rebuild was performed.
 func (s *Store) ReconcileKeyIndex(ctx context.Context, forceRebuild bool) (rebuilt bool, err error) {
 	var count int
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM peers`).Scan(&count)
+	err = s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM peers) + (SELECT COUNT(*) FROM peers WHERE prev_key_hash != '' AND prev_key_expires_at > ?)`, s.nowUnix()).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -155,7 +180,6 @@ func (s *Store) ReconcileKeyIndex(ctx context.Context, forceRebuild bool) (rebui
 		return false, nil
 	}
 
-	// Mismatch or forced: rebuild
 	_, _, err = s.LoadKeyIndex(ctx)
 	if err != nil {
 		return false, err
