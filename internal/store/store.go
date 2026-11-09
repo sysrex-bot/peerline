@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -63,6 +64,9 @@ type Store struct {
 	keyIndexLoaded     bool
 	indexMu            sync.Mutex // held across peer-row writes and LoadKeyIndex swap
 	auditEnabled       bool
+	auditSigner        ed25519.PrivateKey
+	auditInstance      string
+	auditFail          func() error
 }
 
 // nowUnix returns the current Unix timestamp from the store's clock.
@@ -136,6 +140,11 @@ type OpenOptions struct {
 	// AuditEnabled turns AppendAudit into a real write. The schema is always
 	// migrated. When false, appends are no-ops. Set from PEERLINE_AUDIT_ENABLED.
 	AuditEnabled bool
+
+	// AuditSigner is the instance Ed25519 key. Required when AuditEnabled is
+	// used from request paths. AuditInstance is the peerline_instance field.
+	AuditSigner   ed25519.PrivateKey
+	AuditInstance string
 
 	// vacuumInto is an injectable hook for testing. If nil, uses db.Exec("VACUUM INTO ?", path).
 	vacuumInto func(db *sql.DB, backupPath string) error
@@ -595,6 +604,8 @@ func OpenWithOptions(path string, opts OpenOptions) (*Store, error) {
 		backupReused:       reused,
 		keyIndex:           newKeyIndex(),
 		auditEnabled:       opts.AuditEnabled,
+		auditSigner:        opts.AuditSigner,
+		auditInstance:      opts.AuditInstance,
 	}, nil
 }
 
@@ -1783,19 +1794,54 @@ func (s *Store) RotateKeyWithGrace(ctx context.Context, id, newKeyHash string, g
 	}
 	now := s.nowUnix()
 	s.keyIndexRemove(id)
-	var res sql.Result
 	var expires int64
-	if graceSeconds == 0 {
-		res, err = s.db.ExecContext(ctx, `UPDATE peers SET key_hash=?, prev_key_hash='', prev_key_expires_at=0 WHERE id=?`, newKeyHash, id)
-	} else {
+	runUpdate := func(exec func(context.Context, string, ...any) (sql.Result, error)) (sql.Result, error) {
+		if graceSeconds == 0 {
+			return exec(ctx, `UPDATE peers SET key_hash=?, prev_key_hash='', prev_key_expires_at=0 WHERE id=?`, newKeyHash, id)
+		}
 		expires = now + int64(graceSeconds)
-		res, err = s.db.ExecContext(ctx, `UPDATE peers SET prev_key_hash=key_hash, prev_key_expires_at=?, key_hash=? WHERE id=?`, expires, newKeyHash, id)
+		return exec(ctx, `UPDATE peers SET prev_key_hash=key_hash, prev_key_expires_at=?, key_hash=? WHERE id=?`, expires, newKeyHash, id)
 	}
+	if !s.auditEnabled {
+		res, err := runUpdate(s.db.ExecContext)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		s.keyIndexRemove(id)
+		s.keyIndex.add(newKeyHash, id)
+		if graceSeconds > 0 {
+			s.keyIndex.addUntil(oldHash, id, expires)
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := runUpdate(tx.ExecContext)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
+	}
+	prefix := newKeyHash
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	leaf, err := tokenLeaf("key.rotated", prefix)
+	if err != nil {
+		return err
+	}
+	if err := s.noteAudit(ctx, tx, "key.rotated", id, "", leaf, ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	s.keyIndexRemove(id)
 	s.keyIndex.add(newKeyHash, id)
@@ -1810,15 +1856,36 @@ func (s *Store) DeletePeer(ctx context.Context, id string) error {
 	s.indexMu.Lock()
 	defer s.indexMu.Unlock()
 	s.keyIndexRemove(id)
-	res, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
+	if !s.auditEnabled {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	s.keyIndexRemove(id)
-	return nil
+	leaf, err := tokenLeaf("peer.deleted", "")
+	if err != nil {
+		return err
+	}
+	if err := s.noteAudit(ctx, tx, "peer.deleted", id, "", leaf, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) PeerByKeyHash(ctx context.Context, keyHash string) (*Peer, error) {
@@ -1982,6 +2049,13 @@ func (s *Store) CreateInviteAtomic(ctx context.Context, codeHash, from string, s
 	if err != nil {
 		return "", err
 	}
+	leaf, err := tokenLeaf("invite.created", "")
+	if err != nil {
+		return "", err
+	}
+	if err := s.noteAudit(ctx, tx, "invite.created", from, "", leaf, extraJSON(scopes)); err != nil {
+		return "", err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", err
@@ -2026,6 +2100,13 @@ func (s *Store) createPairingInviteAtomic(ctx context.Context, codeHash, pairing
 	_, err = tx.ExecContext(ctx, `INSERT INTO invites(code_hash,from_peer,scopes,bags,expires_at,pairing_token_hash,public_id,require_confirm) VALUES(?,?,?,?,?,?,?,?)`,
 		codeHash, from, join(scopes), join(bags), expires.Unix(), pairingTokenHash, publicID, requireConfirm)
 	if err != nil {
+		return "", err
+	}
+	leaf, err := tokenLeaf("invite.created", "")
+	if err != nil {
+		return "", err
+	}
+	if err := s.noteAudit(ctx, tx, "invite.created", from, "", leaf, extraJSON(scopes)); err != nil {
 		return "", err
 	}
 
@@ -2101,16 +2182,46 @@ func (s *Store) ListInvitesByPeer(ctx context.Context, peerID string, limit, off
 // DeleteInvite revokes an unused invite by public_id (owner-only).
 // Returns ErrNotFound if the invite doesn't exist, already used, or doesn't belong to owner.
 func (s *Store) DeleteInvite(ctx context.Context, publicID, ownerID string) error {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM invites WHERE public_id=? AND from_peer=? AND used_by IS NULL`,
-		publicID, ownerID)
+	exec := func(q DBTX) (int64, error) {
+		res, err := q.ExecContext(ctx,
+			`DELETE FROM invites WHERE public_id=? AND from_peer=? AND used_by IS NULL`,
+			publicID, ownerID)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return n, nil
+	}
+	if !s.auditEnabled {
+		n, err := exec(s.db)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	defer tx.Rollback()
+	n, err := exec(tx)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	leaf, err := tokenLeaf("invite.revoked", "")
+	if err != nil {
+		return err
+	}
+	if err := s.noteAudit(ctx, tx, "invite.revoked", ownerID, "", leaf, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const purgeBatchSize = 500
@@ -2280,6 +2391,9 @@ func (s *Store) AcceptInviteByPairingToken(ctx context.Context, pairingTokenHash
 	if err != nil {
 		return nil, err
 	}
+	if err := s.noteGrant(ctx, tx, grant); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -2326,6 +2440,9 @@ func (s *Store) AcceptInvite(ctx context.Context, codeHash, accepter string, bac
 
 	grant, err := acceptInviteInTx(ctx, tx, codeHash, accepter, backScopes, backBags, s.nowUnix())
 	if err != nil {
+		return nil, err
+	}
+	if err := s.noteGrant(ctx, tx, grant); err != nil {
 		return nil, err
 	}
 
@@ -2376,6 +2493,9 @@ func (s *Store) RegisterAndAcceptByPairing(ctx context.Context, pairingTokenHash
 
 	grant, err = acceptInviteInTx(ctx, tx, codeHash, peerID, backScopes, backBags, ts)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.noteGrant(ctx, tx, grant); err != nil {
 		return nil, err
 	}
 
@@ -2525,14 +2645,36 @@ func (s *Store) ListGrants(ctx context.Context, peer string) ([]Grant, error) {
 
 // RevokeGrant removes the grant owner->grantee.
 func (s *Store) RevokeGrant(ctx context.Context, owner, grantee string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM grants WHERE owner=? AND grantee=?`, owner, grantee)
+	if !s.auditEnabled {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM grants WHERE owner=? AND grantee=?`, owner, grantee)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM grants WHERE owner=? AND grantee=?`, owner, grantee)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	leaf, err := tokenLeaf("grant.revoked", "")
+	if err != nil {
+		return err
+	}
+	if err := s.noteAudit(ctx, tx, "grant.revoked", owner, grantee, leaf, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PurgeExpiredMessages deletes message rows older than retentionSeconds.
@@ -2587,14 +2729,36 @@ type Message struct {
 
 func (s *Store) InsertMessage(ctx context.Context, m *Message) error {
 	ts := s.nowUnix()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO messages(sender,recipient,type,body,reply_to,created_at) VALUES(?,?,?,?,?,?)`,
+	if !s.auditEnabled {
+		res, err := s.db.ExecContext(ctx, `INSERT INTO messages(sender,recipient,type,body,reply_to,created_at) VALUES(?,?,?,?,?,?)`,
+			m.From, m.To, m.Type, m.Body, m.ReplyTo, ts)
+		if err != nil {
+			return err
+		}
+		m.ID, _ = res.LastInsertId()
+		m.CreatedAt = time.Unix(ts, 0).UTC()
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO messages(sender,recipient,type,body,reply_to,created_at) VALUES(?,?,?,?,?,?)`,
 		m.From, m.To, m.Type, m.Body, m.ReplyTo, ts)
 	if err != nil {
 		return err
 	}
 	m.ID, _ = res.LastInsertId()
 	m.CreatedAt = time.Unix(ts, 0).UTC()
-	return nil
+	leaf, err := messageLeaf(m)
+	if err != nil {
+		return err
+	}
+	if err := s.noteAudit(ctx, tx, "message.sent", m.From, m.To, leaf, ""); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MessageVisible reports whether message id was sent to or by peer (for reply_to checks).
@@ -2711,6 +2875,13 @@ func (s *Store) PutBag(ctx context.Context, owner, name string, content []byte, 
 		ON CONFLICT(owner,name) DO UPDATE SET content=excluded.content, version=excluded.version,
 		updated_by=excluded.updated_by, updated_at=excluded.updated_at`, owner, name, content, next, by, s.nowUnix())
 	if err != nil {
+		return 0, err
+	}
+	leaf, err := bagLeaf(next, content)
+	if err != nil {
+		return 0, err
+	}
+	if err := s.noteAudit(ctx, tx, "bag.put", owner, by, leaf, ""); err != nil {
 		return 0, err
 	}
 	return next, tx.Commit()
