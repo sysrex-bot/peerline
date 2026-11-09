@@ -112,6 +112,25 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /a2a:
+    post:
+      operationId: a2aRPC
+      summary: A2A JSON-RPC (polling)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: A2A-Version
+          in: header
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: JSON-RPC result or error
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
   /v1/public/stats:
     get:
       operationId: publicStats
