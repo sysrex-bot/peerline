@@ -27,6 +27,7 @@ import (
 	"github.com/sysrex/peerline/internal/pair"
 	"github.com/sysrex/peerline/internal/store"
 	"github.com/sysrex/peerline/internal/version"
+	"github.com/sysrex/peerline/internal/webhook"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -117,6 +118,13 @@ type Server struct {
 	trustedNets []*net.IPNet
 	clk         clock.Clock // time source for invite expiry and rate limiters
 	claims      ClaimStore  // claim/confirm backend; nil = claim routes are not served
+
+	// testWebhookChallenge replaces the HTTPS verification challenge in tests.
+	testWebhookChallenge func(url, secret string) error
+	// testWebhookPost replaces the signed delivery POST in tests.
+	testWebhookPost func(id string, body []byte, signature string) (int, error)
+	webhookDeliv    *msg.Limiter
+	webhookMetrics  webhook.Metrics
 
 	// For pruning verifyLim
 	pruneDone chan struct{}
@@ -230,14 +238,15 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		st:          st,
-		cfg:         cfg,
-		log:         cfg.Logger,
-		lim:         NewLimiterManager(cfg),
-		verifyLim:   msg.NewLimiterPerHour(3, 3, msg.WithClock(clk.Now)), // 3 verification emails per peer/address per hour
-		trustedNets: trustedNets,
-		clk:         clk,
-		pruneDone:   make(chan struct{}),
+		st:           st,
+		cfg:          cfg,
+		log:          cfg.Logger,
+		lim:          NewLimiterManager(cfg),
+		verifyLim:    msg.NewLimiterPerHour(3, 3, msg.WithClock(clk.Now)), // 3 verification emails per peer/address per hour
+		webhookDeliv: msg.NewLimiter(600, 10, msg.WithClock(clk.Now)),     // 10 deliveries/s, burst 10
+		trustedNets:  trustedNets,
+		clk:          clk,
+		pruneDone:    make(chan struct{}),
 	}
 
 	s.statsCacheTTL = cfg.StatsCacheTTL
@@ -326,6 +335,7 @@ func (s *Server) buildHandler() (http.Handler, []string) {
 	reg(authed, "GET /v1/me", s.rateLimitAuth(s.me))
 	reg(authed, "PUT /v1/me", s.rateLimitWrite(s.updateMe))
 	reg(authed, "POST /v1/me/rotate-key", s.rateLimitWrite(s.rotateKey))
+	s.webhookRoutes(reg, authed)
 	reg(authed, "DELETE /v1/me", s.rateLimitWrite(s.deleteMe))
 	reg(authed, "POST /v1/me/verify-email", s.rateLimitWrite(s.verifyEmail))
 	reg(authed, "POST /v1/invites", s.rateLimitWrite(s.createInvite))
@@ -1594,6 +1604,10 @@ const notifyPreviewMax = 200
 func (s *Server) notifyNewMessage(ctx context.Context, m *store.Message) {
 	// The message is already stored. Don't drop the wake-up if the client hangs up.
 	ctx = context.WithoutCancel(ctx)
+
+	if s.deliverWebhook(ctx, m) {
+		return
+	}
 
 	// Only send to verified emails
 	email, err := s.st.GetVerifiedNotifyEmail(ctx, m.To)
