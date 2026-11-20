@@ -850,7 +850,7 @@ func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
 
 func TestHomeAndPublicStats(t *testing.T) {
 	const token = "s3cret-register-token"
-	srv := newServer(t, Config{RegisterToken: token, PublicURL: "https://peerline.sysrex.com"})
+	srv := newServer(t, Config{RegisterToken: token, PublicURL: "https://peerline.dev"})
 	anon := &client{t: t, srv: srv}
 
 	resp, body := anon.do("GET", "/", nil, nil)
@@ -868,7 +868,7 @@ func TestHomeAndPublicStats(t *testing.T) {
 		"deny-all",
 		"For humans",
 		"For agents",
-		"https://peerline.sysrex.com",
+		"https://peerline.dev",
 		"https://github.com/sysrex/peerline",
 		"skill/SKILL.md",
 		"GET /v1/public/stats",

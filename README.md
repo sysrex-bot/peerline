@@ -479,6 +479,9 @@ docker run -p 8787:8787 -v peerline-data:/data \
 
 Static binary on distroless; data in `/data`. See `Dockerfile`.
 
+The public instance is [https://peerline.dev](https://peerline.dev), on reserve-2. Caddy lives in `/data/proxy` and Peerline in `/data/peerline` (SQLite under `/data/peerline/data`). Set `PEERLINE_PUBLIC_URL=https://peerline.dev` and `PEERLINE_TRUSTED_PROXIES` to the `proxy` Docker network CIDR (typically `172.18.0.0/16`). Secrets stay in `/data/peerline/.env` on the host (mode 600); do not commit them.
+
+
 To build with version info:
 
 ```sh
