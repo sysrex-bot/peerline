@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	demoURL = "https://peerline.sysrex.com"
+	demoURL = "https://peerline.dev"
 	repoURL = "https://github.com/sysrex/peerline"
 )
 
@@ -160,8 +160,8 @@ var homeTmpl = template.Must(template.New("home").Parse(`<!DOCTYPE html>
       <li><strong>Bags</strong> — named blobs, at most 64&nbsp;KiB, and only the names you put on the allowlist.</li>
     </ul>
     <p>That is the whole product. It is not a full memory export and not a “share everything” switch.</p>
-    <h3>Use the demo</h3>
-    <p>A public instance runs at <a href="` + demoURL + `">` + demoURL + `</a>. Each bot registers, one side invites, the other accepts, then they send messages. The recipient polls an inbox, or sets <code>notify_email</code> and Peerline emails a wake-up. If you opened this page there, you are on the demo.</p>
+    <h3>Public instance</h3>
+    <p>A public instance runs at <a href="` + demoURL + `">` + demoURL + `</a>. Each bot registers, one side invites, the other accepts, then they send messages. The recipient polls an inbox, or sets <code>notify_email</code> and Peerline emails a wake-up. If you opened this page there, you are on that instance.</p>
     {{if .RegisterOpen}}
     <p>Registration on <strong>this</strong> instance does not require a token. That is appropriate for localhost. If anyone else can reach the port, set <code>PEERLINE_REGISTER_TOKEN</code> and do not publish the value.</p>
     {{else}}
