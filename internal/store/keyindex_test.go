@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/sysrex/peerline/internal/auth"
@@ -454,4 +456,134 @@ func BenchmarkKeyIndex100k(b *testing.B) {
 	})
 
 	b.Logf("Index size at 100k peers: %d entries, approx %.1f MB", st.KeyIndexLen(), float64(st.KeyIndexLen()*100)/1024/1024)
+}
+
+// TestKeyIndexRotateDuringRebuild checks that a rotation concurrent with
+// LoadKeyIndex cannot leave the old hash in the index, and that lookups keep
+// working against the live index (no mid-rebuild clear).
+func TestKeyIndexRotateDuringRebuild(t *testing.T) {
+	st, err := Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if _, _, err := st.LoadKeyIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 20
+	type peer struct {
+		id   string
+		hash string
+	}
+	peers := make([]peer, n)
+	for i := 0; i < n; i++ {
+		id := auth.NewID()
+		hash := auth.Hash(auth.NewKey())
+		if err := st.CreatePeer(ctx, id, "p", hash, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		peers[i] = peer{id: id, hash: hash}
+	}
+
+	var mu sync.Mutex
+	current := make(map[string]string, n) // id -> current hash
+	for _, p := range peers {
+		current[p.id] = p.hash
+	}
+
+	var wg sync.WaitGroup
+	errc := make(chan error, 8)
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				if _, _, err := st.LoadKeyIndex(ctx); err != nil {
+					errc <- err
+					return
+				}
+			}
+		}()
+	}
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				p := peers[w*5+i%5] // each worker owns a disjoint set of 5 peers
+				newHash := auth.Hash(auth.NewKey())
+				if err := st.RotateKey(ctx, p.id, newHash); err != nil {
+					errc <- err
+					return
+				}
+				mu.Lock()
+				old := current[p.id]
+				current[p.id] = newHash
+				mu.Unlock()
+				if _, ok := st.KeyIndexLookup(old); ok {
+					errc <- fmt.Errorf("old key still in index after RotateKey for %s", p.id)
+					return
+				}
+				if got, ok := st.KeyIndexLookup(newHash); !ok || got != p.id {
+					errc <- fmt.Errorf("new key missing from index after RotateKey for %s", p.id)
+					return
+				}
+			}
+		}(w)
+	}
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				mu.Lock()
+				snapshot := make(map[string]string, len(current))
+				for id, h := range current {
+					snapshot[id] = h
+				}
+				mu.Unlock()
+				for _, h := range snapshot {
+					st.KeyIndexLookup(h)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, _, err := st.LoadKeyIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.db.QueryContext(ctx, `SELECT key_hash, id FROM peers`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := map[string]string{}
+	for rows.Next() {
+		var h, id string
+		if err := rows.Scan(&h, &id); err != nil {
+			t.Fatal(err)
+		}
+		want[h] = id
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if st.KeyIndexLen() != len(want) {
+		t.Fatalf("index len %d, db rows %d", st.KeyIndexLen(), len(want))
+	}
+	for h, id := range want {
+		got, ok := st.KeyIndexLookup(h)
+		if !ok || got != id {
+			t.Fatalf("lookup %s: got %q ok=%v, want %q", h, got, ok, id)
+		}
+	}
 }

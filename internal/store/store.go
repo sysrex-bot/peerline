@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,6 +61,7 @@ type Store struct {
 	backupReused       bool
 	keyIndex           *keyIndex
 	keyIndexLoaded     bool
+	indexMu            sync.Mutex // held across peer-row writes and LoadKeyIndex swap
 }
 
 // nowUnix returns the current Unix timestamp from the store's clock.
@@ -1498,11 +1500,12 @@ type Peer struct {
 }
 
 func (s *Store) CreatePeer(ctx context.Context, id, name, keyHash, notifyEmail, notifyToken string) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	verified := 0
 	_, err := s.db.ExecContext(ctx, `INSERT INTO peers(id,name,key_hash,created_at,notify_email,notify_email_verified,notify_email_token) VALUES(?,?,?,?,?,?,?)`,
 		id, name, keyHash, s.nowUnix(), notifyEmail, verified, notifyToken)
 	if err == nil {
-		// Add to key index after successful insert
 		s.keyIndex.add(keyHash, id)
 	}
 	return err
@@ -1621,6 +1624,8 @@ func (s *Store) GetVerifiedNotifyEmail(ctx context.Context, id string) (string, 
 // RotateKey replaces the peer's API key hash. The old key stops authenticating
 // immediately; grants, bags and identity are untouched.
 func (s *Store) RotateKey(ctx context.Context, id, newKeyHash string) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	s.keyIndexRemove(id)
 	res, err := s.db.ExecContext(ctx, `UPDATE peers SET key_hash=? WHERE id=?`, newKeyHash, id)
 	if err != nil {
@@ -1629,12 +1634,15 @@ func (s *Store) RotateKey(ctx context.Context, id, newKeyHash string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	s.keyIndexRemove(id)
 	s.keyIndex.add(newKeyHash, id)
 	return nil
 }
 
 // DeletePeer removes the peer and, via foreign keys, its grants, invites, messages and bags.
 func (s *Store) DeletePeer(ctx context.Context, id string) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	s.keyIndexRemove(id)
 	res, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE id=?`, id)
 	if err != nil {
@@ -1643,6 +1651,7 @@ func (s *Store) DeletePeer(ctx context.Context, id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	s.keyIndexRemove(id)
 	return nil
 }
 
@@ -1993,12 +2002,45 @@ func (s *Store) PurgeExpiredInvites(ctx context.Context, retentionSeconds int64)
 // purgeOrphanPeers deletes peers created by an unconfirmed claim that never gained a grant,
 // message, bag or invite. The grace cutoff protects a peer whose claim row is not yet written.
 func (s *Store) purgeOrphanPeers(ctx context.Context, cutoff int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM peers WHERE created_via_invite=1 AND created_at<?
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	const pred = `created_via_invite=1 AND created_at<?
 		AND NOT EXISTS (SELECT 1 FROM grants WHERE owner=peers.id OR grantee=peers.id)
 		AND NOT EXISTS (SELECT 1 FROM messages WHERE sender=peers.id OR recipient=peers.id)
 		AND NOT EXISTS (SELECT 1 FROM bags WHERE owner=peers.id)
-		AND NOT EXISTS (SELECT 1 FROM invites WHERE from_peer=peers.id OR claimed_by=peers.id OR used_by=peers.id)`, cutoff)
-	return err
+		AND NOT EXISTS (SELECT 1 FROM invites WHERE from_peer=peers.id OR claimed_by=peers.id OR used_by=peers.id)`
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM peers WHERE `+pred, cutoff)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		s.keyIndexRemove(id)
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM peers WHERE `+pred, cutoff)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		s.keyIndexRemove(id)
+	}
+	return nil
 }
 
 type InviteInfo struct {
@@ -2118,6 +2160,8 @@ func (s *Store) AcceptInvite(ctx context.Context, codeHash, accepter string, bac
 // RegisterAndAcceptByPairing atomically registers a new peer and accepts a pairing invite.
 // Returns the grant from the inviter.
 func (s *Store) RegisterAndAcceptByPairing(ctx context.Context, pairingTokenHash, peerID, name, keyHash, notifyEmail, notifyToken string, backScopes, backBags []string) (grant *Grant, err error) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	// #14 fix: Read-only check before BeginTx to avoid taking write lock for invalid tokens
 	var codeHash, fromPeer string
 	var exp int64

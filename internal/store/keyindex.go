@@ -70,11 +70,14 @@ func (idx *keyIndex) Len() int {
 	return len(idx.entries)
 }
 
-// clear removes all entries (for rebuilding).
-func (idx *keyIndex) clear() {
+// replace swaps in a newly built map. Lookups keep seeing the previous map until the swap.
+func (idx *keyIndex) replace(entries map[string]string) {
+	if entries == nil {
+		entries = make(map[string]string)
+	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.entries = make(map[string]string)
+	idx.entries = entries
 }
 
 // LoadKeyIndex loads all key hashes from the peers table into the index.
@@ -82,6 +85,8 @@ func (idx *keyIndex) clear() {
 // This must be called once at startup before the server begins serving requests.
 func (s *Store) LoadKeyIndex(ctx context.Context) (n int, dur time.Duration, err error) {
 	start := time.Now()
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 
 	rows, err := s.db.QueryContext(ctx, `SELECT key_hash, id FROM peers`)
 	if err != nil {
@@ -89,21 +94,19 @@ func (s *Store) LoadKeyIndex(ctx context.Context) (n int, dur time.Duration, err
 	}
 	defer rows.Close()
 
-	s.keyIndex.clear()
-
+	next := make(map[string]string)
 	for rows.Next() {
 		var keyHash, peerID string
 		if err := rows.Scan(&keyHash, &peerID); err != nil {
 			return 0, 0, err
 		}
-		s.keyIndex.add(keyHash, peerID)
+		next[keyHash] = peerID
 		n++
 	}
-
 	if err := rows.Err(); err != nil {
 		return 0, 0, err
 	}
-
+	s.keyIndex.replace(next)
 	s.keyIndexLoaded = true
 	dur = time.Since(start)
 	return n, dur, nil
