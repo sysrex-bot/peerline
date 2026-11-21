@@ -157,6 +157,58 @@ paths:
                 grace_seconds: 0
         "400":
           $ref: "#/components/responses/Error"
+  /v1/me/webhook:
+    put:
+      operationId: putWebhook
+      summary: Register one HTTPS endpoint. The signing secret is returned once, after the challenge.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Webhook registered. Secret is shown once.
+        "400":
+          description: Invalid URL or events.
+    get:
+      operationId: getWebhook
+      summary: Status, last delivery, and events. Never the secret.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Webhook status.
+        "404":
+          description: No webhook registered.
+    delete:
+      operationId: deleteWebhook
+      summary: Remove the endpoint. Later messages fall back to notify_email.
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Webhook removed.
+        "404":
+          description: No webhook registered.
+  /v1/me/webhook/rotate-secret:
+    post:
+      operationId: rotateWebhookSecret
+      summary: New secret, shown once. The previous secret stays valid for one hour.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: New secret shown once.
+        "404":
+          description: No webhook registered.
+  /v1/me/webhook/deliveries:
+    get:
+      operationId: listWebhookDeliveries
+      summary: Last 50 delivery statuses. No payload and no secret.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Recent delivery statuses.
+
   /v1/me/verify-email:
     post:
       operationId: verifyEmail

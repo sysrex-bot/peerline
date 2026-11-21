@@ -79,6 +79,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV5InviteClaimState,
 	migrateV6ClaimOffer,
 	migrateV7KeyGrace,
+	migrateV8PeerWebhook,
 }
 
 // SchemaVersion returns the maximum schema version this binary supports.
@@ -1496,6 +1497,32 @@ func migrateV7KeyGrace(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateV8PeerWebhook adds the per-peer webhook endpoint and delivery log.
+func migrateV8PeerWebhook(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS peer_webhook (
+  peer_id TEXT PRIMARY KEY REFERENCES peers(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  secret TEXT NOT NULL,
+  old_secret TEXT NOT NULL DEFAULT '',
+  old_secret_expires_at INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  dead INTEGER NOT NULL DEFAULT 0,
+  events TEXT NOT NULL DEFAULT 'message.received'
+);
+CREATE TABLE IF NOT EXISTS webhook_delivery (
+  id TEXT PRIMARY KEY,
+  peer_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  payload TEXT NOT NULL DEFAULT '',
+  UNIQUE(peer_id, message_id)
+);`)
+	return err
 }
 
 // outstandingInvite is the one definition of an unused invite that can still be acted on
