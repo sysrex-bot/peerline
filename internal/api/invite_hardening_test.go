@@ -361,10 +361,9 @@ func TestGETLimiterTokenRefill(t *testing.T) {
 		Logger: slog.Default(),
 	}
 
-	// Freeze clock at epoch (use pointer so we can advance it)
-	clock := time.Unix(1000, 0)
-	clockPtr := &clock
-	srv := newTestServer(st, cfg, func() time.Time { return *clockPtr })
+	// Use a mutex-protected fake clock; the maintenance loop also calls Now().
+	clk := clocktest.New(time.Unix(1000, 0))
+	srv := newTestServer(st, cfg, clk.Now)
 
 	handler := srv.Handler()
 
@@ -390,7 +389,7 @@ func TestGETLimiterTokenRefill(t *testing.T) {
 	}
 
 	// Advance clock by 60 seconds (refills 60 tokens at 60/min = 1 token/sec)
-	*clockPtr = clockPtr.Add(60 * time.Second)
+	clk.Advance(60 * time.Second)
 
 	// Now requests should succeed again (refilled at least 1 token)
 	if code := makeRequest(); code != 200 {
