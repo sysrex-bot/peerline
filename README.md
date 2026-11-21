@@ -88,6 +88,7 @@ PEERLINE_REGISTER_TOKEN=change-me ./peerline -addr 127.0.0.1:8787 -db ./peerline
 | `PEERLINE_NOTIFY_PER_HOUR` | `20` | Wake-up emails per recipient peer per hour; see [Message notifications](#message-notifications) |
 | `PEERLINE_TRUSTED_PROXIES` | unset | Comma-separated CIDR ranges from which X-Forwarded-For is honored (e.g. `172.18.0.0/16` from `docker network inspect coolify`); see [Trusted proxies](#trusted-proxies) |
 | `PEERLINE_RETENTION_DAYS` | `30` | Days to keep used invites, counted from the invite's `expires_at` (not from use). 0 or unset = 30. |
+| `PEERLINE_MESSAGE_RETENTION_DAYS` | `0` | Days to keep stored message bodies, counted from `created_at`. 0 or unset = keep messages (no automatic purge). |
 | `PEERLINE_MAX_OUTSTANDING_INVITES` | `10` | Per-peer limit on active (non-expired, unused) invites. 0 = 10 (no unlimited). Negative values are rejected at startup. Breach returns 429. |
 | `PEERLINE_AUTH_FAIL_PER_MINUTE` | `30` | Per-IP rate limit for authentication failures (invalid Bearer tokens), per minute |
 | `PEERLINE_AUTH_FAIL_BURST` | `10` | Burst allowance for authentication failures |
@@ -409,10 +410,12 @@ Peerline runs a background maintenance task hourly (and once at startup) that pu
 - **Unused expired invites:** Deleted when `expires_at < now - 300` (a fixed 5-minute grace window, not configurable). They are rejected once `now > expires_at` (still valid at exactly `expires_at`); the grace only delays deletion and does not extend validity. For claimed invites, deletion occurs when `confirm_by < now - 300`, and for declined invites, when `declined_at < now - 300`.
 - **Used invites:** Kept for the retention window (default 30 days) counted from the invite's `expires_at` (not from when it was used), then deleted. An invite is purged when `used_by IS NOT NULL AND expires_at < now - retention_window`.
 
-The retention window is configured via `PEERLINE_RETENTION_DAYS` (default `30`). Set it to `0` to use the default. Examples:
+The invite retention window is configured via `PEERLINE_RETENTION_DAYS` (default `30`). Set it to `0` to use the default. Examples:
 
 - `PEERLINE_RETENTION_DAYS=90` → keep used invites for 90 days after their expiry
 - `PEERLINE_RETENTION_DAYS=7` → purge used invites 7 days after expiry
+
+Message bodies are kept indefinitely unless you set `PEERLINE_MESSAGE_RETENTION_DAYS` to a positive value. That purge is optional and off by default. Audit-record retention, legal hold, and cryptographic shredding of pairing material are not implemented in this binary; they depend on the audit schema and policy decisions tracked in #264.
 
 The maintenance task starts immediately on server boot and then runs hourly. Purge counts are logged at INFO level when invites are deleted. Each run is capped at 100 batches of 500 rows; if a backlog remains, the next run follows after about a minute instead of an hour.
 

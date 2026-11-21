@@ -13,28 +13,40 @@ import (
 // StorePurger defines the interface for cleaning expired invites.
 type StorePurger interface {
 	PurgeExpiredInvites(ctx context.Context, retentionSeconds int64) (deleted int, more bool, err error)
+	PurgeExpiredMessages(ctx context.Context, retentionSeconds int64) (deleted int, more bool, err error)
 	ReconcileKeyIndex(ctx context.Context, forceRebuild bool) (rebuilt bool, err error)
 }
 
 // MaintenanceManager runs periodic cleanup tasks.
 type MaintenanceManager struct {
-	store                StorePurger
-	log                  *slog.Logger
-	clk                  clock.Clock
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	wg                   sync.WaitGroup
-	retentionSeconds     int64
-	tickInterval         time.Duration
-	followUpInterval     time.Duration
-	more                 bool
-	rebuildInterval      time.Duration
-	lastRebuild          time.Time
-	rebuildIntervalHours int
+	store                   StorePurger
+	log                     *slog.Logger
+	clk                     clock.Clock
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	retentionSeconds        int64
+	messageRetentionSeconds int64
+	tickInterval            time.Duration
+	followUpInterval        time.Duration
+	more                    bool
+	rebuildInterval         time.Duration
+	lastRebuild             time.Time
+	rebuildIntervalHours    int
 }
 
 // MaintenanceManagerOption configures a MaintenanceManager.
 type MaintenanceManagerOption func(*MaintenanceManager)
+
+// WithMessageRetention enables batched deletion of messages older than d.
+// Zero or negative leaves message bodies in place (the default).
+func WithMessageRetention(d time.Duration) MaintenanceManagerOption {
+	return func(m *MaintenanceManager) {
+		if d > 0 {
+			m.messageRetentionSeconds = int64(d / time.Second)
+		}
+	}
+}
 
 // WithTickInterval sets the interval between purge runs (default 1 hour).
 func WithTickInterval(d time.Duration) MaintenanceManagerOption {
@@ -91,6 +103,9 @@ func (m *MaintenanceManager) maintenanceLoop() {
 
 	// Run once immediately at startup
 	m.more = m.purgeExpired()
+	if m.purgeExpiredMessages() {
+		m.more = true
+	}
 	m.reconcileKeyIndex()
 
 	// Then run every tick interval, or after followUpInterval when a capped run left a backlog
@@ -103,6 +118,9 @@ func (m *MaintenanceManager) maintenanceLoop() {
 			return
 		case <-timer.C:
 			m.more = m.purgeExpired()
+			if m.purgeExpiredMessages() {
+				m.more = true
+			}
 			m.reconcileKeyIndex()
 			timer.Reset(m.nextDelay())
 		}
@@ -124,6 +142,20 @@ func (m *MaintenanceManager) purgeExpired() bool {
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		m.log.Error("maintenance: purge failed", "err", err)
+	}
+	return more
+}
+
+func (m *MaintenanceManager) purgeExpiredMessages() bool {
+	if m.messageRetentionSeconds <= 0 {
+		return false
+	}
+	count, more, err := m.store.PurgeExpiredMessages(m.ctx, m.messageRetentionSeconds)
+	if count > 0 {
+		m.log.Info("maintenance: purged messages", "count", count, "more", more)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		m.log.Error("maintenance: message purge failed", "err", err)
 	}
 	return more
 }

@@ -14,8 +14,11 @@ import (
 type fakePurger struct {
 	mu               sync.Mutex
 	calls            []int64 // retention seconds from each call
+	msgCalls         []int64
 	purgeReturnCount int
 	purgeReturnErr   error
+	msgReturnCount   int
+	msgReturnErr     error
 	called           chan struct{} // signals when PurgeExpiredInvites is called
 	moreOnce         atomic.Bool   // first call reports more=true
 }
@@ -31,11 +34,25 @@ func (f *fakePurger) PurgeExpiredInvites(ctx context.Context, retentionSeconds i
 	return f.purgeReturnCount, f.moreOnce.CompareAndSwap(true, false), f.purgeReturnErr
 }
 
+func (f *fakePurger) PurgeExpiredMessages(ctx context.Context, retentionSeconds int64) (int, bool, error) {
+	f.mu.Lock()
+	f.msgCalls = append(f.msgCalls, retentionSeconds)
+	f.mu.Unlock()
+	return f.msgReturnCount, false, f.msgReturnErr
+}
+
 func (f *fakePurger) ReconcileKeyIndex(ctx context.Context, forceRebuild bool) (bool, error) {
 	// No-op for these tests
 	return false, nil
 }
 
+func (f *fakePurger) getMsgCalls() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	copied := make([]int64, len(f.msgCalls))
+	copy(copied, f.msgCalls)
+	return copied
+}
 func (f *fakePurger) getCalls() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()

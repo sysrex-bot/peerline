@@ -183,6 +183,9 @@ func validateStartupEnv(getenv func(string) string) error {
 	if _, _, _, _, err := parseAPILimitEnv(getenv); err != nil {
 		return err
 	}
+	if _, err := parseNonNegativeInt(getenv("PEERLINE_MESSAGE_RETENTION_DAYS"), "PEERLINE_MESSAGE_RETENTION_DAYS", 36500); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -193,6 +196,10 @@ func buildAPIConfig(getenv func(string) string, clk clock.Clock, ml mailer.Sende
 
 	regTok := getenv("PEERLINE_REGISTER_TOKEN")
 	maxOutstandingInvites, emailPerHour, notifyPerHour, keyIndexRebuildHours, err := parseAPILimitEnv(getenv)
+	if err != nil {
+		return api.Config{}, err
+	}
+	messageRetentionDays, err := parseNonNegativeInt(getenv("PEERLINE_MESSAGE_RETENTION_DAYS"), "PEERLINE_MESSAGE_RETENTION_DAYS", 36500)
 	if err != nil {
 		return api.Config{}, err
 	}
@@ -219,26 +226,27 @@ func buildAPIConfig(getenv func(string) string, clk clock.Clock, ml mailer.Sende
 	}
 
 	return api.Config{
-		RegisterToken:         regTok,
-		CodePepper:            []byte(getenv("PEERLINE_CODE_PEPPER")),
-		Logger:                logger,
-		Mailer:                ml,
-		PublicURL:             publicURL,
-		EmailPerHour:          emailPerHour,
-		NotifyPerHour:         notifyPerHour,
-		TrustedProxies:        trustedProxies,
-		AllowBroadIPv6:        allowBroadIPv6,
-		Clock:                 clk,
-		MaxOutstandingInvites: maxOutstandingInvites,
-		RetentionSeconds:      retentionSeconds,
-		AuthFailPerMinute:     authFailPerMinute,
-		AuthFailBurst:         authFailBurst,
-		WritePerMinute:        writePerMinute,
-		WriteBurst:            writeBurst,
-		KeyIndexRebuildHours:  keyIndexRebuildHours,
-		VersionDetail:         versionDetail,
-		MaxBagsPerPeer:        maxBagsPerPeer,
-		MaxBagBytesPerPeer:    maxBagBytesPerPeer,
+		RegisterToken:           regTok,
+		CodePepper:              []byte(getenv("PEERLINE_CODE_PEPPER")),
+		Logger:                  logger,
+		Mailer:                  ml,
+		PublicURL:               publicURL,
+		EmailPerHour:            emailPerHour,
+		NotifyPerHour:           notifyPerHour,
+		TrustedProxies:          trustedProxies,
+		AllowBroadIPv6:          allowBroadIPv6,
+		Clock:                   clk,
+		MaxOutstandingInvites:   maxOutstandingInvites,
+		RetentionSeconds:        retentionSeconds,
+		MessageRetentionSeconds: retentionSecondsFromDays(messageRetentionDays),
+		AuthFailPerMinute:       authFailPerMinute,
+		AuthFailBurst:           authFailBurst,
+		WritePerMinute:          writePerMinute,
+		WriteBurst:              writeBurst,
+		KeyIndexRebuildHours:    keyIndexRebuildHours,
+		VersionDetail:           versionDetail,
+		MaxBagsPerPeer:          maxBagsPerPeer,
+		MaxBagBytesPerPeer:      maxBagBytesPerPeer,
 	}, nil
 }
 

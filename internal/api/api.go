@@ -77,6 +77,9 @@ type Config struct {
 	// RetentionSeconds is how long (in seconds) to keep used invites before purging.
 	// Default is 30 days (2592000 seconds). Set to 0 for the default.
 	RetentionSeconds int64
+	// MessageRetentionSeconds is how long (in seconds) to keep message rows.
+	// 0 (the default) leaves message bodies in place.
+	MessageRetentionSeconds int64
 	// AuthFailPerMinute and AuthFailBurst control the per-IP rate limit for
 	// authentication failures (invalid Bearer tokens). Default: 30/min, burst 10.
 	AuthFailPerMinute int
@@ -242,7 +245,11 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	go s.pruneVerifyLoop()
 
 	// Start maintenance tasks
-	s.maint = NewMaintenanceManager(context.Background(), st, cfg.Logger, clk, cfg.RetentionSeconds, cfg.KeyIndexRebuildHours)
+	var maintOpts []MaintenanceManagerOption
+	if cfg.MessageRetentionSeconds > 0 {
+		maintOpts = append(maintOpts, WithMessageRetention(time.Duration(cfg.MessageRetentionSeconds)*time.Second))
+	}
+	s.maint = NewMaintenanceManager(context.Background(), st, cfg.Logger, clk, cfg.RetentionSeconds, cfg.KeyIndexRebuildHours, maintOpts...)
 
 	return s, nil
 }
