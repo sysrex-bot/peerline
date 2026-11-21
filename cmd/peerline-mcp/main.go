@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sysrex/peerline/internal/mcpbridge"
+	"github.com/sysrex/peerline/internal/msg"
 )
 
 type config struct {
@@ -79,7 +80,7 @@ func run() error {
 		return err
 	}
 	relay := mcpbridge.NewHTTPRelay(cfg.AllowPrivateRelay)
-	bridge := &mcpbridge.Server{Auth: auth, Relay: relay, ResourceURL: cfg.OAuth.ResourceURL, Metadata: auth.Metadata(), Challenge: auth.Challenge()}
+	bridge := &mcpbridge.Server{Auth: auth, Relay: relay, ResourceURL: cfg.OAuth.ResourceURL, Metadata: auth.Metadata(), Challenge: auth.Challenge(), AuthLim: msg.NewLimiter(30, 10)}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if *eventsEnabled {

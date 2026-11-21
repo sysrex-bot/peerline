@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -25,6 +26,8 @@ type Server struct {
 	ResourceURL string
 	Metadata    map[string]any
 	Challenge   string
+	// AuthLim, if set, limits Authenticate attempts per client IP on /mcp.
+	AuthLim *msg.Limiter
 }
 
 type rpcRequest struct {
@@ -66,8 +69,22 @@ func (s *Server) serveRPC(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if s.AuthLim != nil {
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || ip == "" {
+			ip = r.RemoteAddr
+		}
+		if !s.AuthLim.Allow(ip) {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+	}
 	account, err := s.Auth.Authenticate(r)
 	if err != nil {
+		if errors.Is(err, errAuthorizationUnavailable) {
+			http.Error(w, "authorization verification temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("WWW-Authenticate", s.Challenge)
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
