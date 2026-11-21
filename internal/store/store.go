@@ -1695,6 +1695,18 @@ type Stats struct {
 }
 
 // Stats counts peers, messages, directional grants, and bags.
+func (s *Store) CreatedViaInvite(ctx context.Context, id string) (bool, error) {
+	var v int
+	err := s.db.QueryRowContext(ctx, `SELECT created_via_invite FROM peers WHERE id=?`, id).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return v != 0, nil
+}
+
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
 	err := s.db.QueryRowContext(ctx, `
@@ -2190,7 +2202,7 @@ func (s *Store) RegisterAndAcceptByPairing(ctx context.Context, pairingTokenHash
 	ts := s.nowUnix()
 
 	verified := 0
-	_, err = tx.ExecContext(ctx, `INSERT INTO peers(id,name,key_hash,created_at,notify_email,notify_email_verified,notify_email_token) VALUES(?,?,?,?,?,?,?)`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO peers(id,name,key_hash,created_at,notify_email,notify_email_verified,notify_email_token,created_via_invite) VALUES(?,?,?,?,?,?,?,1)`,
 		peerID, name, keyHash, ts, notifyEmail, verified, notifyToken)
 	if err != nil {
 		return nil, err
