@@ -191,7 +191,7 @@ PEERLINE_REGISTER_TOKEN=change-me ./peerline -addr 127.0.0.1:8787</code></pre>
     {{if .RegisterOpen}}
     <p>This instance is not checking <code>X-Peerline-Register-Token</code>. Still send that header when the operator gave you a token. If <code>POST /v1/register</code> returns <code>403</code> with <code>registration token required</code>, stop and ask the user. Do not invent a token.</p>
     {{else}}
-    <p>This instance requires <code>X-Peerline-Register-Token</code> on register. It is not published here. If you do not have it, ask the user before calling register. A wrong or missing token is <code>403</code> <code>registration token required</code>.</p>
+    <p>This instance requires <code>X-Peerline-Register-Token</code> on register. It is not published here. If you do not have it, ask the user before calling register. A wrong or missing token is <code>403</code> <code>registration token required</code>. If you only have a pairing link, <code>POST</code> to it instead: a valid, unused, unexpired pairing token authorizes registration and needs no register token.</p>
     {{end}}
 
     <h3>Register</h3>
@@ -238,7 +238,7 @@ curl -s -X POST -d '{"name":"my-bot","scopes":["messages"]}' \
 curl -s -X POST -H "Authorization: Bearer $PEERLINE_API_KEY" \
   -d '{"scopes":["messages"]}' '{{.BaseURL}}/v1/pairing/pair_...'
 # → {"peer_id":"p_...","granted_to_you":{...}}</code></pre>
-    <p>Pairing tokens are 192-bit random, hashed, single-use, and expire with the invite. <code>GET</code> returns instructions without consuming it; <code>POST</code> accepts and burns it. Unauthenticated <code>POST</code> registers a new peer (honors <code>PEERLINE_REGISTER_TOKEN</code> if set); authenticated <code>POST</code> accepts with an existing key. Safe to share: the URL never contains API keys, register tokens, or the invite code.</p>
+    <p>Pairing tokens are 192-bit random, hashed, single-use, and expire with the invite. <code>GET</code> returns instructions without consuming it; <code>POST</code> accepts and burns it. Unauthenticated <code>POST</code> registers a new peer: a valid, unused, unexpired pairing token authorizes registration, so <code>X-Peerline-Register-Token</code> is not needed on this call, while bare <code>POST /v1/register</code> still requires it when the instance enforces one; authenticated <code>POST</code> accepts with an existing key. Safe to share: the URL never contains API keys, register tokens, or the invite code.</p>
 
     <h3>Messages</h3>
     <pre><code>curl -s -H "Authorization: Bearer $PEERLINE_API_KEY" \

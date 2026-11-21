@@ -1252,6 +1252,83 @@ func TestPairingAcceptStatusCodes(t *testing.T) {
 	}
 }
 
+func TestPairingTokenAuthorizesRegistration(t *testing.T) {
+	const regToken = "test-reg-token"
+	regHdr := map[string]string{"X-Peerline-Register-Token": regToken}
+	clk := clocktest.New(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	st, err := store.OpenWithOptions(t.TempDir()+"/t.db", store.OpenOptions{Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := Config{Clock: clk, RegisterToken: regToken}
+	prepareTestConfig(t, st, &cfg)
+	apiSrv, err := New(st, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(apiSrv.Stop)
+	srv := httptest.NewServer(apiSrv.Handler())
+	t.Cleanup(srv.Close)
+
+	alice := registerAs(t, srv, "alice", regHdr)
+	anon := &client{t: t, srv: srv}
+	newLink := func(ttl int) string {
+		resp, body := alice.do("POST", "/v1/invites", map[string]any{
+			"scopes":           []string{"messages"},
+			"generate_pairing": true,
+			"ttl_seconds":      ttl,
+		}, nil)
+		want(t, resp, body, 201)
+		var inv struct {
+			PairingURL string `json:"pairing_url"`
+		}
+		if err := json.Unmarshal(body, &inv); err != nil {
+			t.Fatal(err)
+		}
+		return "/v1/pairing/" + strings.Split(inv.PairingURL, "/v1/pairing/")[1]
+	}
+
+	t.Run("valid pairing registers without register token", func(t *testing.T) {
+		resp, body := anon.do("POST", newLink(3600), map[string]any{"name": "bob"}, nil)
+		want(t, resp, body, 201)
+		var got struct {
+			PeerID string `json:"peer_id"`
+			APIKey string `json:"api_key"`
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.PeerID == "" || got.APIKey == "" {
+			t.Fatalf("missing peer_id or api_key: %s", body)
+		}
+	})
+
+	t.Run("used pairing without register token is 403", func(t *testing.T) {
+		path := newLink(3600)
+		resp, body := anon.do("POST", path, map[string]any{"name": "carol"}, nil)
+		want(t, resp, body, 201)
+		resp, body = anon.do("POST", path, map[string]any{"name": "dave"}, nil)
+		want(t, resp, body, 403)
+		resp, body = anon.do("POST", path, map[string]any{"name": "dave"}, regHdr)
+		want(t, resp, body, 404)
+	})
+
+	t.Run("expired pairing without register token is 403", func(t *testing.T) {
+		path := newLink(10)
+		clk.Advance(time.Minute)
+		resp, body := anon.do("POST", path, map[string]any{"name": "erin"}, nil)
+		want(t, resp, body, 403)
+		resp, body = anon.do("POST", path, map[string]any{"name": "erin"}, regHdr)
+		want(t, resp, body, 404)
+	})
+
+	t.Run("bare register still requires register token", func(t *testing.T) {
+		resp, body := anon.do("POST", "/v1/register", map[string]any{"name": "frank"}, nil)
+		want(t, resp, body, 403)
+	})
+}
+
 // Security hardening tests for #17, #18, #21-#24, #31-#39
 
 func TestXFFParsing(t *testing.T) {
