@@ -57,6 +57,8 @@ func TestOAuthIntrospectionAccountIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.client = srv.Client()
+	a.posTTL = 0
+	a.negTTL = 0
 	req := httptest.NewRequest("POST", "https://mcp.example/mcp", nil)
 	req.Header.Set("Authorization", "Bearer access-token")
 	got, err := a.Authenticate(req)
