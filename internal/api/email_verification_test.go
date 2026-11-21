@@ -692,3 +692,37 @@ func TestUpdateMePerAddressLimitDoesNotSpendPerPeerBudget(t *testing.T) {
 		t.Error("dave's per-peer budget was spent when it shouldn't have been")
 	}
 }
+
+// TestUpdateMePerPeerLimitDoesNotSpendPerAddressBudget verifies that a peer
+// who has already used up their per-peer verification budget cannot burn a
+// victim address's shared budget.
+func TestUpdateMePerPeerLimitDoesNotSpendPerAddressBudget(t *testing.T) {
+	cap := &captureMailer{}
+	srv := newServer(t, Config{Mailer: cap})
+
+	alice := register(t, srv, "alice")
+	for i := 0; i < 3; i++ {
+		addr := fmt.Sprintf("alice%d@example.com", i)
+		resp, body := alice.do("PUT", "/v1/me", map[string]string{"notify_email": addr}, nil)
+		want(t, resp, body, 200)
+	}
+	resp, body := alice.do("PUT", "/v1/me", map[string]string{"notify_email": "victim@example.com"}, nil)
+	want(t, resp, body, 429)
+	if strings.Contains(string(body), "per-address") {
+		t.Errorf("expected per-peer rate limit, got: %s", body)
+	}
+
+	bob := register(t, srv, "bob")
+	resp, body = bob.do("PUT", "/v1/me", map[string]string{"notify_email": "victim@example.com"}, nil)
+	want(t, resp, body, 200)
+	found := false
+	for _, m := range cap.all() {
+		if m.To == "victim@example.com" && strings.Contains(m.Subject, "Verify") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("alice's exhausted per-peer budget burned the victim address budget")
+	}
+}

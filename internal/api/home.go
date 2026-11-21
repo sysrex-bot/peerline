@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -29,8 +30,24 @@ type homeData struct {
 	store.Stats
 }
 
+func (s *Server) cachedStats(ctx context.Context) (store.Stats, error) {
+	now := s.clk.Now()
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if !s.statsCachedAt.IsZero() && now.Sub(s.statsCachedAt) < s.statsCacheTTL {
+		return s.statsCache, nil
+	}
+	st, err := s.st.Stats(ctx)
+	if err != nil {
+		return st, err
+	}
+	s.statsCache = st
+	s.statsCachedAt = now
+	return st, nil
+}
+
 func (s *Server) publicStats(w http.ResponseWriter, r *http.Request) {
-	st, err := s.st.Stats(r.Context())
+	st, err := s.cachedStats(r.Context())
 	if err != nil {
 		s.internal(w, err)
 		return
@@ -39,7 +56,7 @@ func (s *Server) publicStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
-	st, err := s.st.Stats(r.Context())
+	st, err := s.cachedStats(r.Context())
 	if err != nil {
 		s.internal(w, err)
 		return

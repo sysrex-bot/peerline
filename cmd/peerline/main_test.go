@@ -707,8 +707,8 @@ func TestBuildTrustedProxySettings(t *testing.T) {
 func TestBuildAPIConfig(t *testing.T) {
 	// Tripwire: if api.Config's field count changes, update this test.
 	// buildAPIConfig sets 20 fields; MsgPerMinute, MsgBurst, EmailBurst,
-	// EmailRcptPerHour, and NotifyBurst are defaulted in api.New.
-	if got, want := reflect.TypeOf(api.Config{}).NumField(), 25; got != want {
+	// EmailRcptPerHour, NotifyBurst, and StatsCacheTTL are defaulted in api.New.
+	if got, want := reflect.TypeOf(api.Config{}).NumField(), 26; got != want {
 		t.Fatalf("api.Config has %d fields, expected %d; update TestBuildAPIConfig expected configs", got, want)
 	}
 

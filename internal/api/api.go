@@ -98,6 +98,9 @@ type Config struct {
 	// MaxBagBytesPerPeer is the maximum total bytes across all bags for a peer.
 	// <= 0 uses the default (1 MiB).
 	MaxBagBytesPerPeer int64
+	// StatsCacheTTL is how long GET / and GET /v1/public/stats reuse the last
+	// COUNT(*) result. <= 0 uses the default (60s).
+	StatsCacheTTL time.Duration
 }
 
 type Server struct {
@@ -122,6 +125,11 @@ type Server struct {
 	// Test-only hook: called after the invite row exists and before the email
 	// rate-limit check. Production: nil.
 	testBeforeEmailLimitHook func(publicID, ownerID string)
+
+	statsMu       sync.Mutex
+	statsCache    store.Stats
+	statsCachedAt time.Time
+	statsCacheTTL time.Duration
 }
 
 func New(st *store.Store, cfg Config) (*Server, error) {
@@ -223,6 +231,11 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 		trustedNets: trustedNets,
 		clk:         clk,
 		pruneDone:   make(chan struct{}),
+	}
+
+	s.statsCacheTTL = cfg.StatsCacheTTL
+	if s.statsCacheTTL <= 0 {
+		s.statsCacheTTL = 60 * time.Second
 	}
 
 	// Start pruning verifyLim every 15 minutes
@@ -473,15 +486,13 @@ func (s *Server) internal(w http.ResponseWriter, err error) {
 // ---- auth ----
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
-	// Check register token first, before charging rate limit
-	if s.cfg.RegisterToken != "" && !auth.ConstantEqual(r.Header.Get("X-Peerline-Register-Token"), s.cfg.RegisterToken) {
-		writeErr(w, http.StatusForbidden, "registration token required")
-		return
-	}
-
-	// Now charge the rate limiter after token validation
+	// Charge first so a wrong or missing register token cannot be guessed without bound.
 	if !s.lim.regLim.Allow(rateLimitKey(clientIP(r.RemoteAddr, r.Header.Values("X-Forwarded-For"), s.trustedNets))) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	if s.cfg.RegisterToken != "" && !auth.ConstantEqual(r.Header.Get("X-Peerline-Register-Token"), s.cfg.RegisterToken) {
+		writeErr(w, http.StatusForbidden, "registration token required")
 		return
 	}
 
@@ -626,23 +637,34 @@ func (s *Server) updateMe(w http.ResponseWriter, r *http.Request) {
 	var tokenWithExpiry string
 	var rawToken string
 	if email != "" {
-		// Rate limit verification emails: check per-address first, then per-peer
 		normalizedAddr := strings.ToLower(email)
-		if !s.verifyLim.Allow(normalizedAddr) {
-			// Per-address budget exhausted
-			writeErr(w, http.StatusTooManyRequests, "verification email rate limited (per-address); try later")
-			return
-		} else if !s.verifyLim.Allow(me) {
+		if !s.verifyLim.Ready(me) {
 			writeErr(w, http.StatusTooManyRequests, "verification email rate limited; try later")
 			return
-		} else {
-			rawToken = auth.NewSecret(auth.EmailVerifyPrefix)
-			issuedAt := s.clk.Now().Unix()
-			tokenWithExpiry = fmt.Sprintf("%d:%s", issuedAt, auth.Hash(rawToken))
 		}
+		if !s.verifyLim.Ready(normalizedAddr) {
+			writeErr(w, http.StatusTooManyRequests, "verification email rate limited (per-address); try later")
+			return
+		}
+		if !s.verifyLim.Allow(me) {
+			writeErr(w, http.StatusTooManyRequests, "verification email rate limited; try later")
+			return
+		}
+		if !s.verifyLim.Allow(normalizedAddr) {
+			s.verifyLim.Refund(me)
+			writeErr(w, http.StatusTooManyRequests, "verification email rate limited (per-address); try later")
+			return
+		}
+		rawToken = auth.NewSecret(auth.EmailVerifyPrefix)
+		issuedAt := s.clk.Now().Unix()
+		tokenWithExpiry = fmt.Sprintf("%d:%s", issuedAt, auth.Hash(rawToken))
 	}
 
 	if err := s.st.SetNotifyEmail(r.Context(), me, email, tokenWithExpiry); err != nil {
+		if email != "" && rawToken != "" {
+			s.verifyLim.Refund(me)
+			s.verifyLim.Refund(strings.ToLower(email))
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "peer not found")
 			return
