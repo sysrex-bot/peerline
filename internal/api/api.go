@@ -815,6 +815,18 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if in.GeneratePairing || to != "" {
+		via, err := s.st.CreatedViaInvite(r.Context(), me)
+		if err != nil {
+			s.internal(w, err)
+			return
+		}
+		if via {
+			writeErr(w, http.StatusForbidden, "peers created via invite cannot send email invites or generate pairing links")
+			return
+		}
+	}
+
 	code := auth.NewSecret("inv_")
 	exp := s.clk.Now().Add(ttl).UTC()
 	var pairingToken string
