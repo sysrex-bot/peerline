@@ -96,8 +96,9 @@ func TestIntrospectionResultCache(t *testing.T) {
 }
 
 func TestIntrospectionConcurrencyCap(t *testing.T) {
+	const extra = 4
 	var hits, inflight, maxInflight atomic.Int32
-	started := make(chan struct{})
+	started := make(chan struct{}, defaultIntrospectLimit+extra)
 	release := make(chan struct{})
 	srv := newIntrospectServer(t, &hits, func(w http.ResponseWriter, r *http.Request, body map[string]any) {
 		n := inflight.Add(1)
@@ -107,10 +108,7 @@ func TestIntrospectionConcurrencyCap(t *testing.T) {
 				break
 			}
 		}
-		select {
-		case started <- struct{}{}:
-		default:
-		}
+		started <- struct{}{}
 		<-release
 		inflight.Add(-1)
 		json.NewEncoder(w).Encode(body)
@@ -121,7 +119,6 @@ func TestIntrospectionConcurrencyCap(t *testing.T) {
 	a.posTTL = 0
 	a.negTTL = 0
 
-	const extra = 4
 	var wg sync.WaitGroup
 	for i := 0; i < defaultIntrospectLimit+extra; i++ {
 		wg.Add(1)
