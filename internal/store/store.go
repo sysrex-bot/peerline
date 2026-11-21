@@ -2357,6 +2357,44 @@ func (s *Store) RevokeGrant(ctx context.Context, owner, grantee string) error {
 	return nil
 }
 
+// PurgeExpiredMessages deletes message rows older than retentionSeconds.
+// retentionSeconds <= 0 means do not purge (the default). It stops after
+// purgeMaxBatches batches and reports more=true so the caller can continue soon.
+func (s *Store) PurgeExpiredMessages(ctx context.Context, retentionSeconds int64) (deleted int, more bool, err error) {
+	if retentionSeconds <= 0 {
+		return 0, false, nil
+	}
+	cutoff := s.nowUnix() - retentionSeconds
+	for batches := 0; ; batches++ {
+		if err := ctx.Err(); err != nil {
+			return deleted, false, err
+		}
+		if batches == purgeMaxBatches {
+			return deleted, true, nil
+		}
+		res, err := s.db.ExecContext(ctx,
+			`DELETE FROM messages WHERE rowid IN (
+				SELECT rowid FROM messages WHERE created_at < ?1 LIMIT ?2
+			)`, cutoff, purgeBatchSize)
+		if err != nil {
+			return deleted, false, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return deleted, false, err
+		}
+		deleted += int(n)
+		if int(n) < purgeBatchSize {
+			return deleted, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return deleted, false, ctx.Err()
+		case <-time.After(purgeYield):
+		}
+	}
+}
+
 // ---- messages ----
 
 type Message struct {
