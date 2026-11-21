@@ -850,7 +850,8 @@ func itoa(n int64) string { b, _ := json.Marshal(n); return string(b) }
 
 func TestHomeAndPublicStats(t *testing.T) {
 	const token = "s3cret-register-token"
-	srv := newServer(t, Config{RegisterToken: token, PublicURL: "https://peerline.dev"})
+	clk := clocktest.New(time.Now())
+	srv := newServer(t, Config{RegisterToken: token, PublicURL: "https://peerline.dev", Clock: clk})
 	anon := &client{t: t, srv: srv}
 
 	resp, body := anon.do("GET", "/", nil, nil)
@@ -940,6 +941,7 @@ func TestHomeAndPublicStats(t *testing.T) {
 	resp, body = a.do("PUT", "/v1/bags/status", []byte("ok"), nil)
 	want(t, resp, body, 201)
 
+	clk.Advance(61 * time.Second)
 	resp, body = anon.do("GET", "/v1/public/stats", nil, nil)
 	want(t, resp, body, 200)
 	var st store.Stats
@@ -966,6 +968,34 @@ func TestHomeAndPublicStats(t *testing.T) {
 	}
 	if strings.Contains(home, bodyText) || strings.Contains(home, a.key) || strings.Contains(home, b.key) {
 		t.Fatal("landing page leaked a message body or api key")
+	}
+}
+
+func TestPublicStatsAreCached(t *testing.T) {
+	clk := clocktest.New(time.Now())
+	srv := newServer(t, Config{Clock: clk})
+	anon := &client{t: t, srv: srv}
+
+	resp, body := anon.do("GET", "/v1/public/stats", nil, nil)
+	want(t, resp, body, 200)
+	if strings.TrimSpace(string(body)) != `{"peers":0,"messages":0,"grants":0,"bags":0}` {
+		t.Fatalf("stats before register: %s", body)
+	}
+	register(t, srv, "alice")
+	resp, body = anon.do("GET", "/v1/public/stats", nil, nil)
+	want(t, resp, body, 200)
+	if strings.TrimSpace(string(body)) != `{"peers":0,"messages":0,"grants":0,"bags":0}` {
+		t.Fatalf("cached stats changed before TTL: %s", body)
+	}
+	clk.Advance(61 * time.Second)
+	resp, body = anon.do("GET", "/v1/public/stats", nil, nil)
+	want(t, resp, body, 200)
+	var st store.Stats
+	if err := json.Unmarshal(body, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Peers != 1 || st.Messages != 0 || st.Grants != 0 || st.Bags != 0 {
+		t.Fatalf("stats after TTL: %+v", st)
 	}
 }
 
@@ -1592,18 +1622,21 @@ func TestInboxPollingNoRateLimit(t *testing.T) {
 	}
 }
 
-func TestRegisterRateLimitAfterTokenCheck(t *testing.T) {
+func TestRegisterRateLimitChargesBeforeTokenCheck(t *testing.T) {
 	srv := newServer(t, Config{RegisterToken: "secret123"})
 
-	// Without register token, should fail with 403 before charging rate limit
-	// We can hammer this without getting 429
-	for i := 0; i < 20; i++ {
+	// regBurst is 5. Wrong or missing tokens must still charge regLim.
+	for i := 0; i < 5; i++ {
 		resp, body := doAnon(t, srv, "POST", "/v1/register", map[string]any{"name": "test"}, nil)
 		want(t, resp, body, 403)
 		if strings.Contains(string(body), "rate limited") {
-			t.Fatal("got 429 before token check")
+			t.Fatalf("attempt %d: got 429, want 403", i+1)
 		}
 	}
+	resp, body := doAnon(t, srv, "POST", "/v1/register", map[string]any{"name": "test"}, nil)
+	want(t, resp, body, 429)
+	resp, body = doAnon(t, srv, "POST", "/v1/register", map[string]any{"name": "test"}, map[string]string{"X-Peerline-Register-Token": "secret123"})
+	want(t, resp, body, 429)
 }
 
 func TestPairingRateLimitAfterTokenValidation(t *testing.T) {
